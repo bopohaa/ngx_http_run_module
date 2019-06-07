@@ -23,29 +23,36 @@ Set the library of the function that will be called
 * **default**: `none`
 * **context**: `main`
 
-Set the name of the called function
+Specify the size of the buffer to record the execution result
 
-### run_func
-* **syntax**: `run_func exported_function_name`
-* **default**: `none`
+### run_buf
+* **syntax**: `run_buf buffer_size_in_bytes`
+* **default**: `NGX_MAX_ALLOC_FROM_POOL`
 * **context**: `main, server, location`
+Where
+* **buffer_size_in_bytes**: buffer size in bytes
 
 ## Execution
 
 Execute the specified function with the specified value and record the result in a new variable (the value can be a string or the name of a variable)
 
 ### run_func
-* **syntax**: `run $output_variable_name $input_variable_name|raw_value [optional_buffer_size=4095]`
+* **syntax**: `run exported_function_name $output_variable_name [$input_variable_name|or_raw_value...]`
 * **context**: `location`
+Where
+* **exported_function_name**: exported function name in our dynlib
+* **$output_variable_name**: variable name nginx to record the result of the function
+* **$input_variable_name|or_raw_value**: values that will be passed to the called function (several parameters can be passed)
 
 ## Exported function type
-`int32_t function_name(void* input, uint32_t input_size, void* output, uint32_t output_size)`
+`int32_t run_func_name (uint32_t input_count, void** input, uint32_t* input_size, void* output, uint32_t output_size)`
 Where
-* **input**: raw pointer to input data from `run` directive
-* **input_size**: size in bytes of input data
+* **input_count**: number of parameters passed
+* **input**: raw pointer to the list of passed parameters
+* **input_size**: raw pointer to the list of sizes of the passed parameters
 * **output**: raw pointer to output data buffer from `run` directive
 * **output_size**: max size in bytes of output data buffer
-* **_return value_**: size result in bytes stored in output data buffer, if less 0 then this is abs a required size
+* **_return value_**: size result in bytes stored in output data buffer, if less than 0, then this is the abs required size (it will be repeated with the requested size of the outgoing buffer)
 
 ## Sample configuration
 ```
@@ -53,9 +60,8 @@ http {
 	run_lib my_rust_lib.so;
 	
 	server {
-		run_func hello_rust
 		location /hello {
-			run $body Hello;
+			run hello_rust $body Hello World;
 			return 200 $body;
 		}
 	}

@@ -25,7 +25,6 @@ CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
 OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 */
-
 #include <ngx_config.h>
 #include <ngx_core.h>
 #include <ngx_http.h>
@@ -34,6 +33,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 #define BUFFER_SIZE_MIN NGX_MAX_ALLOC_FROM_POOL
 #define BUFFER_SIZE_MAX 65536*16
+#define MAX_PARAMS_COUNT (NGX_CONF_MAX_ARGS-2)
 
 static void* ngx_http_run_create_loc_conf(ngx_conf_t* cf);
 static char* ngx_http_run_merge_loc_conf(ngx_conf_t* cf, void* parent, void* child);
@@ -41,19 +41,24 @@ static char* ngx_http_run_merge_loc_conf(ngx_conf_t* cf, void* parent, void* chi
 static char* ngx_main_run_lib_cmd(ngx_conf_t* cf, ngx_command_t* cmd, void* conf);
 static char* ngx_http_run_cmd(ngx_conf_t* cf, ngx_command_t* cmd, void* conf);
 
-typedef int32_t(*run_func_ptr)(void* input, uint32_t input_size, void* output, uint32_t output_size);
+typedef int32_t(*run_func_ptr)(uint32_t input_count, void** input, uint32_t* input_size, void* output, uint32_t output_size);
 
 typedef struct {
 	ngx_str_t lib;
 	void* entrypoint;
 	ngx_str_t func;
 	run_func_ptr run;
+	size_t buff;
 } ngx_http_run_loc_conf_t;
 
 typedef struct {
 	ngx_int_t input_variable_index;
 	ngx_str_t or_raw_data;
-	int32_t min_buffer_size;
+} run_func_conf_item_t;
+
+typedef struct {
+	run_func_conf_item_t items[MAX_PARAMS_COUNT];
+	size_t count;
 } run_func_conf_t;
 
 static ngx_command_t ngx_http_run_commands[] = {
@@ -64,16 +69,22 @@ static ngx_command_t ngx_http_run_commands[] = {
 	  NGX_HTTP_LOC_CONF_OFFSET,
 	  0,
 	  NULL},
-	{ ngx_string("run_func"),
+	//{ ngx_string("run_func"),
+	//  NGX_HTTP_MAIN_CONF | NGX_HTTP_SRV_CONF | NGX_HTTP_LOC_CONF | NGX_CONF_TAKE1,
+	//  ngx_conf_set_str_slot,
+	//  NGX_HTTP_LOC_CONF_OFFSET,
+	//  offsetof(ngx_http_run_loc_conf_t, func),
+	//  NULL},
+	{ ngx_string("run_buff"),
 	  NGX_HTTP_MAIN_CONF | NGX_HTTP_SRV_CONF | NGX_HTTP_LOC_CONF | NGX_CONF_TAKE1,
-	  ngx_conf_set_str_slot,
+	  ngx_conf_set_size_slot,
 	  NGX_HTTP_LOC_CONF_OFFSET,
-	  offsetof(ngx_http_run_loc_conf_t, func),
+	  offsetof(ngx_http_run_loc_conf_t, buff),
 	  NULL},
 	{ ngx_string("run"),
-	  NGX_HTTP_LOC_CONF | NGX_CONF_TAKE23,
+	  NGX_HTTP_SRV_CONF | NGX_HTTP_LOC_CONF | NGX_CONF_2MORE,
 	  ngx_http_run_cmd,
-	  0,
+	  NGX_HTTP_LOC_CONF_OFFSET,
 	  0,
 	  NULL},
 
@@ -118,6 +129,7 @@ static void* ngx_http_run_create_loc_conf(ngx_conf_t* cf) {
 
 	conf->run = NGX_CONF_UNSET_PTR;
 	conf->entrypoint = NGX_CONF_UNSET_PTR;
+	conf->buff = NGX_CONF_UNSET_SIZE;
 
 	return conf;
 }
@@ -129,6 +141,7 @@ static char* ngx_http_run_merge_loc_conf(ngx_conf_t * cf, void* parent, void* ch
 	ngx_conf_merge_ptr_value(conf->run, prev->run, NGX_CONF_UNSET_PTR);
 	ngx_conf_merge_str_value(conf->lib, prev->lib, NULL);
 	ngx_conf_merge_str_value(conf->func, prev->func, NULL);
+	ngx_conf_merge_size_value(conf->buff, prev->buff, NGX_CONF_UNSET_SIZE);
 
 	if (conf->entrypoint != NGX_CONF_UNSET_PTR && conf->func.data != NULL && conf->func.len > 0) {
 		char tmp[2049];
@@ -204,35 +217,41 @@ ngx_int_t ngx_http_run_get_variable(ngx_http_request_t * r, ngx_http_variable_va
 		return NGX_ERROR;
 
 	void* result;
-	void* input;
-	size_t inputSize;
+	//void* input;
+	//size_t inputSize;
 
-	run_func_conf_t * loc = (run_func_conf_t*)data;
-	if (loc->input_variable_index == NGX_ERROR) {
-		input = loc->or_raw_data.data;
-		inputSize = loc->or_raw_data.len;
-	}
-	else {
-		ngx_http_variable_value_t* v = ngx_http_get_indexed_variable(r, loc->input_variable_index);
-		if (v == NULL || v->not_found)
-			return NGX_ERROR;
-		input = v->data;
-		inputSize = v->len;
+	run_func_conf_t * con = (run_func_conf_t*)data;
+	void* inputParams[MAX_PARAMS_COUNT];
+	uint32_t inputSizes[MAX_PARAMS_COUNT];
+	size_t i;
+	for (i = 0; i < con->count; ++i) {
+		run_func_conf_item_t* loc = &con->items[i];
+		if (loc->input_variable_index == NGX_ERROR) {
+			inputParams[i] = loc->or_raw_data.data;
+			inputSizes[i] = loc->or_raw_data.len;
+		}
+		else {
+			ngx_http_variable_value_t* v = ngx_http_get_indexed_variable(r, loc->input_variable_index);
+			if (v == NULL)
+				return NGX_ERROR;
+			inputParams[i] = v->data;
+			inputSizes[i] = v->len;
+		}
 	}
 
-	size_t size = loc->min_buffer_size;
+	size_t size = c->buff == NGX_CONF_UNSET_SIZE ? BUFFER_SIZE_MIN : c->buff;
 	result = ngx_pnalloc(r->pool, size);
 	if (result == NULL)
 		return NGX_ERROR;
 
-	int32_t resultSize = c->run(input, inputSize, result, size);
+	int32_t resultSize = c->run(con->count, inputParams, inputSizes, result, size);
 	if (resultSize < 0) {
 		ngx_pfree(r->pool, result);
 		size = 1 + ~resultSize;
 		result = ngx_pnalloc(r->pool, size);
 		if (result == NULL)
 			return NGX_ERROR;
-		resultSize = c->run(input, inputSize, result, size);
+		resultSize = c->run(con->count, inputParams, inputSizes, result, size);
 		if (resultSize < 0)
 			return NGX_ERROR;
 	}
@@ -253,43 +272,47 @@ ngx_int_t ngx_http_run_get_variable(ngx_http_request_t * r, ngx_http_variable_va
 	return NGX_OK;
 }
 
-static char* ngx_http_run_cmd(ngx_conf_t * cf, ngx_command_t * cmd, void* conf)
+static char* ngx_http_run_cmd(ngx_conf_t * cf, ngx_command_t * cmd, void* c)
 {
 	ngx_str_t* values = cf->args->elts;
 
-	if (values[1].data[0] != '$') {
+	ngx_http_run_loc_conf_t* conf = c;
+	conf->func = values[1];
+
+	if (values[2].data[0] != '$') {
 		ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
-			"invalid variable name \"%V\"", &values[1]);
+			"invalid variable name \"%V\"", &values[2]);
 		return NGX_CONF_ERROR;
 	}
-	values[1].len--;
-	values[1].data++;
-
+	values[2].len--;
+	values[2].data++;
+	ngx_http_variable_t* v = ngx_http_add_variable(cf, &values[2], NGX_HTTP_VAR_WEAK);
+	if (v == NULL)
+		return NGX_CONF_ERROR;
+	
 	run_func_conf_t* loc;
 	loc = ngx_pcalloc(cf->pool, sizeof(run_func_conf_t));
 	if (loc == NULL)
 		return NGX_CONF_ERROR;
 
-	loc->min_buffer_size = cf->args->nelts == 4 ? ngx_atoi(values[3].data, values[3].len) : ((int32_t)BUFFER_SIZE_MIN);
-	if (loc->min_buffer_size == NGX_ERROR)
-		return "wrong type of third parameter";
-
-	if (values[2].data[0] == '$') {
-		values[2].len--;
-		values[2].data++;
-		loc->input_variable_index = ngx_http_get_variable_index(cf, &values[2]);
-		if (loc->input_variable_index == NGX_ERROR)
-			return "input variable not found";
+	loc->count = cf->args->nelts - 3;
+	if (loc->count > MAX_PARAMS_COUNT)
+		return "many arguments";
+	ngx_uint_t i;
+	for (i = 3; i < cf->args->nelts; ++i) {
+		run_func_conf_item_t* con = &loc->items[i - 3];
+		if (values[i].data[0] == '$') {
+			values[i].len--;
+			values[i].data++;
+			con->input_variable_index = ngx_http_get_variable_index(cf, &values[i]);
+			if (con->input_variable_index == NGX_ERROR)
+				return "input variable not found";
+		}
+		else {
+			con->input_variable_index = NGX_ERROR;
+			con->or_raw_data = values[i];
+		}
 	}
-	else {
-		loc->input_variable_index = NGX_ERROR;
-		loc->or_raw_data = values[2];
-	}
-
-
-	ngx_http_variable_t* v = ngx_http_add_variable(cf, &values[1], NGX_HTTP_VAR_WEAK);
-	if (v == NULL)
-		return NGX_CONF_ERROR;
 
 	v->get_handler = ngx_http_run_get_variable;
 	v->data = (uintptr_t)loc;
