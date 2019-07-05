@@ -2,6 +2,11 @@ use std::ptr::copy;
 use std::str::{from_utf8};
 
 #[no_mangle]
+pub extern fn hello_rust_init(input_count:u32, input_params: * const *const u8, input_sizes: *const u32) {
+	println!("init");
+}
+
+#[no_mangle]
 pub extern fn hello_rust(input_count:u32, input_params: * const *const u8, input_sizes: *const u32, output:*mut u8, output_size:u32) -> i32 {
 	if output.is_null() {
 		return 0;
@@ -34,4 +39,9 @@ pub extern fn hello_rust(input_count:u32, input_params: * const *const u8, input
 	}
 
 	required as i32
+}
+
+#[no_mangle]
+pub extern fn hello_rust_exit(input_count:u32, input_params: * const *const u8, input_sizes: *const u32) {
+	println!("dispose");
 }
